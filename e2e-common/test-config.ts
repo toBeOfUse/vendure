@@ -13,14 +13,6 @@ import { fileURLToPath } from 'url';
 
 import { getPackageDir } from './get-package-dir';
 
-declare global {
-    namespace NodeJS {
-        interface Global {
-            e2eServerPortsUsed: number[];
-        }
-    }
-}
-
 /**
  * We use a relatively long timeout on the initial beforeAll() function of the
  * e2e tests because on the first run (and always in CI) the sqlite databases
@@ -36,8 +28,33 @@ registerInitializer('mysql', new MysqlInitializer());
 registerInitializer('mariadb', new MysqlInitializer());
 
 export const testConfig = () => {
+    // we use this ports.json file to keep track of which ports are already in use
     // @ts-ignore
     const portsFile = fileURLToPath(new URL('ports.json', import.meta.url));
+    let nextPort: number = -1;
+
+    // acquire a lock on ports.json.
+
+    // this mkdir operation will fail if any other process or thread has created
+    // a ./__ports_json_lock__ directory and hasn't deleted it yet. creating
+    // this directory means claiming the exclusive right to read and modify the
+    // ports.json file; if another process has done this, we just have to wait
+    // until they delete it. in this way, we can make sure that no two processes
+    // are reading and modifying ports.json at once, which can lead to race
+    // conditions. (https://github.com/vendure-ecommerce/vendure/issues/3247).
+
+    // this is inspired by https://stackoverflow.com/a/6229247/3962267
+
+    const lockDirectory = path.resolve(__dirname, '__ports_json_lock__');
+    while (true) {
+        try {
+            fs.mkdirSync(lockDirectory);
+            break;
+        } catch {
+            // failed to acquire the lock; retrying
+        }
+    }
+
     fs.ensureFileSync(portsFile);
     let usedPorts: number[];
     try {
@@ -45,13 +62,17 @@ export const testConfig = () => {
     } catch (e: any) {
         usedPorts = [3010];
     }
-    const nextPort = Math.max(...usedPorts) + 1;
+    nextPort = Math.max(...usedPorts) + 1;
     usedPorts.push(nextPort);
     if (100 < usedPorts.length) {
         // reset the used ports after it gets 100 entries long
         usedPorts = [3010];
     }
     fs.writeJSONSync(portsFile, usedPorts);
+
+    // release the lock and let other threads/processes access the ports.json file
+    fs.rmdirSync(lockDirectory);
+
     return mergeConfig(defaultTestConfig, {
         apiOptions: {
             port: nextPort,
